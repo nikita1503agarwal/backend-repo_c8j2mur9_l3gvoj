@@ -1,8 +1,10 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+import requests
+from typing import List, Optional
 
-app = FastAPI()
+app = FastAPI(title="YouTube Lite API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,56 +14,89 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- External sources ---
+PIPED_BASE = os.getenv("PIPED_BASE", "https://piped.video")
+
+
+def fetch_json(url: str, params: Optional[dict] = None):
+    try:
+        r = requests.get(url, params=params, timeout=12)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
+
+
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+    return {"message": "YouTube Lite API running", "piped": PIPED_BASE}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+
+@app.get("/api/search")
+def search_videos(q: str = Query(..., min_length=1), page: int = 1):
+    """Search videos via Piped (no API key required)."""
+    data = fetch_json(f"{PIPED_BASE}/api/v1/search", params={"q": q, "page": page})
+    # Filter only videos
+    items = [i for i in data if i.get("type") == "video"]
+    results = []
+    for v in items:
+        results.append({
+            "id": v.get("id"),
+            "title": v.get("title"),
+            "author": v.get("uploader"),
+            "authorUrl": v.get("uploaderUrl"),
+            "thumbnail": (v.get("thumbnail") or (v.get("thumbnails") or [{}])[-1].get("url")),
+            "duration": v.get("duration"),
+            "views": v.get("views"),
+            "uploaded": v.get("uploadedDate"),
+            "shortDescription": v.get("shortDescription"),
+        })
+    return {"items": results, "query": q, "page": page}
+
+
+@app.get("/api/trending")
+def trending(region: str = Query("US", min_length=2, max_length=2)):
+    data = fetch_json(f"{PIPED_BASE}/api/v1/trending", params={"region": region})
+    items = [i for i in data if i.get("type") == "video"]
+    results = []
+    for v in items:
+        results.append({
+            "id": v.get("id"),
+            "title": v.get("title"),
+            "author": v.get("uploader"),
+            "authorUrl": v.get("uploaderUrl"),
+            "thumbnail": (v.get("thumbnail") or (v.get("thumbnails") or [{}])[-1].get("url")),
+            "duration": v.get("duration"),
+            "views": v.get("views"),
+            "uploaded": v.get("uploadedDate"),
+        })
+    return {"items": results, "region": region}
+
+
+@app.get("/api/related")
+def related(id: str = Query(..., min_length=5)):
+    data = fetch_json(f"{PIPED_BASE}/api/v1/related", params={"id": id})
+    items = [i for i in data if i.get("type") == "video"]
+    results = []
+    for v in items:
+        results.append({
+            "id": v.get("id"),
+            "title": v.get("title"),
+            "author": v.get("uploader"),
+            "thumbnail": (v.get("thumbnail") or (v.get("thumbnails") or [{}])[-1].get("url")),
+            "duration": v.get("duration"),
+            "views": v.get("views"),
+        })
+    return {"items": results, "id": id}
+
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
+    """Diagnostics endpoint"""
     response = {
         "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
+        "piped": PIPED_BASE,
     }
-    
-    try:
-        # Try to import database module
-        from database import db
-        
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
-    except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
     return response
 
 
